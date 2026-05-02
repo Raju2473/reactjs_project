@@ -1,5 +1,5 @@
 trigger:
-- develop
+- main
 
 variables:
   imageName: powerpulse
@@ -20,7 +20,7 @@ stages:
       displayName: Build and Push Image
       inputs:
         command: buildAndPush
-        containerRegistry: acr-docker-registry   # Docker Registry service connection
+        containerRegistry: containerRegistry  # Docker Registry service connection
         repository: powerpulse
         dockerfile: Dockerfile
         tags: |
@@ -67,7 +67,7 @@ stages:
       displayName: Apply Kubernetes Manifests
       inputs:
         connectionType: Kubernetes Service Connection
-        kubernetesServiceEndpoint: aks-arm-kuber
+        kubernetesServiceEndpoint: kubernates
         namespace: default
         command: apply
         useConfigurationFile: true
