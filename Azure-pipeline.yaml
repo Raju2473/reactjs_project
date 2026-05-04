@@ -15,6 +15,7 @@ stages:
       vmImage: ubuntu-latest
     steps:
     - checkout: self
+    
     - task: NodeTool@0
       displayName: Install Node.js
       inputs:
