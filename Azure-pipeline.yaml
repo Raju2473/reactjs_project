@@ -81,7 +81,7 @@ stages:
 #         configuration: k8s/
 
 - stage: Deploy
-  dependsOn: Build
+  dependsOn: Test
   jobs:
   - job: Deploy
     pool:
