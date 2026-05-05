@@ -60,7 +60,7 @@ stages:
 
 
 
-# ================= continuous deployment =================
+# ================= deployment =================
 # - stage: Deploy
 #   displayName: Deploy to AKS
 #   dependsOn: Build
