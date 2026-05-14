@@ -1,11 +1,94 @@
+# ═══════════════════════════════════════════════════════════════
+# k8s/service.yaml  — PRODUCTION
+# ═══════════════════════════════════════════════════════════════
+
+# ── ClusterIP Service (internal) ─────────────────────────────
+# Pods are exposed inside the cluster only.
+# External traffic enters through the Ingress below.
+# ClusterIP + Ingress = proper connection draining on pod removal.
+# (LoadBalancer alone can drop live connections during pod termination)
 apiVersion: v1
 kind: Service
 metadata:
-  name: powerpulse-frontend-service
+  name: project-frontend-service
+  namespace: production
+  labels:
+    app: project-frontend
 spec:
-  type: LoadBalancer
+  type: ClusterIP
   selector:
-    app: powerpulse-frontend
+    app: project-frontend              # matches pod labels in deployment.yaml
   ports:
-    - port: 80
-      targetPort: 80
+  - name: http
+    port: 80
+    targetPort: 80
+
+---
+# ── Ingress (external HTTPS entry point) ─────────────────────
+# Routes internet traffic → Service → Pods
+# Requires nginx-ingress controller installed on AKS.
+#
+# Install nginx ingress on AKS (run once):
+#   helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+#   helm repo update
+#   helm install ingress-nginx ingress-nginx/ingress-nginx \
+#     --namespace ingress-nginx --create-namespace \
+#     --set controller.replicaCount=2
+#
+# Get external IP after install:
+#   kubectl get svc -n ingress-nginx
+# Point your domain DNS A record to that IP.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: project-frontend-ingress
+  namespace: production
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    # Connection drain settings — gives pods time to finish requests
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    # Uncomment after installing cert-manager for free auto TLS:
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  # Uncomment for HTTPS:
+  # tls:
+  # - hosts:
+  #   - www.yourcompany.com
+  #   secretName: project-frontend-tls
+  rules:
+  - host: www.yourcompany.com          # replace with your actual domain
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: project-frontend-service
+            port:
+              number: 80
+
+---
+# ═══════════════════════════════════════════════════════════════
+# k8s/service-dev.yaml  — DEVELOPMENT
+# Simple LoadBalancer — fine for dev, no domain needed
+# Access via the Azure public IP directly
+# ═══════════════════════════════════════════════════════════════
+# Uncomment and save as service-dev.yaml for your dev environment:
+#
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: project-frontend-service
+#   namespace: development
+#   labels:
+#     app: project-frontend
+# spec:
+#   type: LoadBalancer
+#   selector:
+#     app: project-frontend
+#   ports:
+#   - name: http
+#     port: 80
+#     targetPort: 80

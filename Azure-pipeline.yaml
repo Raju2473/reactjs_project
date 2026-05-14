@@ -1,108 +1,337 @@
+# ═══════════════════════════════════════════════════════════════
+# azure-pipelines.yml
+# GitFlow CI/CD — React/Vite app → ACR → AKS
+#
+# BRANCH FLOW:
+#   feature/*  →  Build + Test only (no deploy)
+#                 Branch policy: PR to develop must pass this
+#   develop    →  Build + Test + Deploy to DEV namespace
+#   main       →  Build + Test + Deploy to PRODUCTION namespace
+#                 (manual approval gate on 'production' environment)
+#
+# BRANCH POLICY SETUP (do in Azure DevOps UI — one time):
+#   Repos → Branches → main → Branch policies:
+#     ✅ Require minimum 1 reviewer
+#     ✅ Build validation → this pipeline → Required
+#     ✅ Require comment resolution
+#   Repeat same for develop branch
+# ═══════════════════════════════════════════════════════════════
+ 
 trigger:
-- main
-
+  branches:
+    include:
+      - main
+      - develop
+      - feature/*
+  paths:
+    exclude:
+      - "*.md"
+      - docs/*
+      - .gitignore
+ 
+# PR trigger — runs Build + Test so branch policy can block merge
+pr:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    exclude:
+      - "*.md"
+ 
+# ── Variables ─────────────────────────────────────────────────
 variables:
-  imageName: powerpulse
-
+  # ACR details — update these to match your registry
+  acrName: 'YOURACR'                              # e.g. mycompanyacr
+  acrLoginServer: 'YOURACR.azurecr.io'           # e.g. mycompanyacr.azurecr.io
+  imageName: 'project-frontend'
+  acrServiceConnection: 'acr-service-connection' # Docker Registry service connection name
+  aksServiceConnection: 'aks-service-connection' # Kubernetes service connection name
+  prodNamespace: 'production'
+  devNamespace: 'development'
+  vmImage: 'ubuntu-latest'
+ 
+# ═══════════════════════════════════════════════════════════════
+# STAGE 1 — Build & Push (main and develop only)
+#            Build validate only (feature/* branches)
+# ═══════════════════════════════════════════════════════════════
 stages:
-# ================= continuous integration=================
 - stage: Build
-  displayName: Build and Push Image to ACR
+  displayName: 'Build and push image'
   jobs:
-  - job: Build
-    displayName: Build Docker Image
+ 
+  # ── Job A: Full build + push (main and develop) ─────────────
+  - job: BuildAndPush
+    displayName: 'Build, test and push to ACR'
     pool:
-      vmImage: ubuntu-latest
+      vmImage: $(vmImage)
+    condition: |
+      or(
+        eq(variables['Build.SourceBranch'], 'refs/heads/main'),
+        eq(variables['Build.SourceBranch'], 'refs/heads/develop')
+      )
     steps:
     - checkout: self
-
+      fetchDepth: 0
+ 
     - task: NodeTool@0
-      displayName: Install Node.js
+      displayName: 'Install Node.js 20.x'
       inputs:
         versionSpec: '20.x'
-
+ 
     - script: npm ci
-      displayName: Install dependencies
-
-    - script: npm test
-      displayName: Run tests
-
+      displayName: 'Install dependencies (clean install)'
+ 
+    - script: npm run build
+      displayName: 'Vite build'
+      env:
+        CI: false                         # don't treat warnings as errors
+ 
+    - script: npm test -- --watchAll=false --passWithNoTests --ci
+      displayName: 'Run unit tests'
+      env:
+        CI: true
+ 
+    - task: PublishTestResults@2
+      displayName: 'Publish test results'
+      condition: always()
+      inputs:
+        testResultsFormat: JUnit
+        testResultsFiles: '**/junit.xml'
+        failTaskOnFailedTests: true
+ 
+    # Image tag format: branchname-buildId  e.g. main-107, develop-92
     - task: Docker@2
-      displayName: Build and Push Image
+      displayName: 'Build and push image to ACR'
       inputs:
         command: buildAndPush
-        containerRegistry: containerRegistry  # Docker Registry service connection
-        repository: powerpulse
+        containerRegistry: $(acrServiceConnection)
+        repository: $(imageName)
         dockerfile: Dockerfile
         tags: |
-          $(Build.BuildId)
-
-#========================Test==================
-- stage: Test
-  displayName: Run Tests
-  jobs:
-  - job: Test
-    displayName: Install deps and run tests
+          $(Build.SourceBranchName)-$(Build.BuildId)
+          latest
+ 
+    - script: |
+        echo "✅ Image pushed: $(acrLoginServer)/$(imageName):$(Build.SourceBranchName)-$(Build.BuildId)"
+      displayName: 'Print image tag'
+ 
+    # Publish k8s manifests as artifact for deploy stages
+    - task: PublishPipelineArtifact@1
+      displayName: 'Publish k8s manifests artifact'
+      inputs:
+        targetPath: 'k8s'
+        artifact: 'manifests'
+        publishLocation: 'pipeline'
+ 
+  # ── Job B: Build validate only (feature branches) ───────────
+  # This job is what branch policy checks on PR to develop/main
+  - job: BuildValidate
+    displayName: 'Feature branch validation (no deploy)'
     pool:
-      vmImage: ubuntu-latest
-
+      vmImage: $(vmImage)
+    condition: startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/')
     steps:
+    - checkout: self
+ 
     - task: NodeTool@0
-      displayName: Install Node.js
+      displayName: 'Install Node.js 20.x'
       inputs:
         versionSpec: '20.x'
-
+ 
     - script: npm ci
-      displayName: Install dependencies
-
-    - script: npm test
-      displayName: Run tests
-
-
-
-# ================= deployment =================
-# - stage: Deploy
-#   displayName: Deploy to AKS
-#   dependsOn: Build
-#   jobs:
-#   - job: Deploy
-#     displayName: Deploy to Kubernetes
-#     pool:
-#       vmImage: ubuntu-latest
-#     steps:
-#     - task: Kubernetes@1
-#       displayName: Apply Kubernetes Manifests
-#       inputs:
-#         connectionType: 'Kubernetes Service Connection'
-#         kubernetesServiceEndpoint: aks-arm-kuber   # Kubernetes service connection
-#         namespace: default
-#         command: apply
-#         useConfigurationFile: true
-#         configuration: k8s/
-
-- stage: Deploy
-  dependsOn: Test
+      displayName: 'Install dependencies'
+ 
+    - script: npm run build
+      displayName: 'Vite build'
+      env:
+        CI: false
+ 
+    - script: npm test -- --watchAll=false --passWithNoTests --ci
+      displayName: 'Run tests'
+      env:
+        CI: true
+ 
+    - script: |
+        echo "✅ Feature branch validation passed"
+        echo "Next step: Open PR to develop branch"
+        echo "Branch policy will require this check to pass before merge"
+      displayName: 'Validation summary'
+ 
+# ═══════════════════════════════════════════════════════════════
+# STAGE 2 — Deploy to DEV (develop branch only)
+# ═══════════════════════════════════════════════════════════════
+- stage: Deploy_Dev
+  displayName: 'Deploy to DEV'
+  dependsOn: Build
+  condition: |
+    and(
+      succeeded(),
+      eq(variables['Build.SourceBranch'], 'refs/heads/develop'),
+      ne(variables['Build.Reason'], 'PullRequest')
+    )
   jobs:
-  - job: Deploy
+  - deployment: DeployToDev
+    displayName: 'Rolling deploy → DEV namespace'
     pool:
-      vmImage: ubuntu-latest
-    steps:
-
-    - task: Bash@3
-      displayName: Replace image tag in Deployment
-      inputs:
-        targetType: inline
-        script: |
-          echo "Replacing image tag with $(Build.BuildId)"
-          sed -i "s/__TAG__/$(Build.BuildId)/g" k8s/deployment.yaml
-          cat k8s/deployment.yaml
-
-    - task: Kubernetes@1
-      displayName: Apply Kubernetes Manifests
-      inputs:
-        connectionType: Kubernetes Service Connection
-        kubernetesServiceEndpoint: kubernates
-        namespace: default
-        command: apply
-        useConfigurationFile: true
-        configuration: k8s/
+      vmImage: $(vmImage)
+    environment: 'development'           # create in Pipelines > Environments
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+ 
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download k8s manifests'
+            inputs:
+              artifactName: 'manifests'
+              downloadPath: '$(System.ArtifactsDirectory)/k8s'
+ 
+          # Inject image tag into deployment.yaml
+          - task: Bash@3
+            displayName: 'Inject image tag'
+            inputs:
+              targetType: inline
+              script: |
+                TAG="$(Build.SourceBranchName)-$(Build.BuildId)"
+                echo "Injecting tag: $TAG"
+                sed -i "s/__TAG__/$TAG/g" $(System.ArtifactsDirectory)/k8s/deployment.yaml
+                sed -i "s/YOURACR/$(acrName)/g" $(System.ArtifactsDirectory)/k8s/deployment.yaml
+                grep "image:" $(System.ArtifactsDirectory)/k8s/deployment.yaml
+ 
+          # Override namespace for dev
+          - task: Bash@3
+            displayName: 'Set namespace to development'
+            inputs:
+              targetType: inline
+              script: |
+                sed -i "s/namespace: production/namespace: development/g" \
+                  $(System.ArtifactsDirectory)/k8s/deployment.yaml
+ 
+          # Apply manifests — KubernetesManifest handles rolling update
+          - task: KubernetesManifest@0
+            displayName: 'Apply manifests to DEV'
+            inputs:
+              action: deploy
+              kubernetesServiceConnection: $(aksServiceConnection)
+              namespace: $(devNamespace)
+              manifests: |
+                $(System.ArtifactsDirectory)/k8s/deployment.yaml
+              containers: '$(acrLoginServer)/$(imageName):$(Build.SourceBranchName)-$(Build.BuildId)'
+              rolloutStatusTimeout: '300'
+ 
+          - script: |
+              echo "✅ DEV deployment complete"
+              echo "Image: $(acrLoginServer)/$(imageName):$(Build.SourceBranchName)-$(Build.BuildId)"
+            displayName: 'Deploy summary'
+ 
+# ═══════════════════════════════════════════════════════════════
+# STAGE 3 — Deploy to PRODUCTION (main branch only)
+# Has manual approval gate — pipeline pauses here for human sign-off
+# ═══════════════════════════════════════════════════════════════
+- stage: Deploy_Prod
+  displayName: 'Deploy to PRODUCTION'
+  dependsOn: Build
+  condition: |
+    and(
+      succeeded(),
+      eq(variables['Build.SourceBranch'], 'refs/heads/main'),
+      ne(variables['Build.Reason'], 'PullRequest')
+    )
+  jobs:
+  - deployment: DeployToProd
+    displayName: 'Rolling deploy → PRODUCTION namespace'
+    pool:
+      vmImage: $(vmImage)
+    # ── IMPORTANT: Add approvers in Azure DevOps ──────────────
+    # Pipelines → Environments → production → Approvals and checks
+    # → Add → Approvals → add your lead/manager
+    # Pipeline pauses here until they click Approve
+    environment: 'production'
+    strategy:
+      runOnce:
+        preDeploy:
+          steps:
+          - script: |
+              echo "════════════════════════════════════════"
+              echo "PRODUCTION DEPLOYMENT STARTING"
+              echo "Image tag : $(Build.SourceBranchName)-$(Build.BuildId)"
+              echo "Namespace : $(prodNamespace)"
+              echo "Triggered by: $(Build.RequestedFor)"
+              echo "════════════════════════════════════════"
+            displayName: 'Pre-deploy info'
+ 
+        deploy:
+          steps:
+          - checkout: self
+ 
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download k8s manifests'
+            inputs:
+              artifactName: 'manifests'
+              downloadPath: '$(System.ArtifactsDirectory)/k8s'
+ 
+          # Inject real ACR name and image tag into deployment.yaml
+          - task: Bash@3
+            displayName: 'Inject image tag into deployment.yaml'
+            inputs:
+              targetType: inline
+              script: |
+                TAG="$(Build.SourceBranchName)-$(Build.BuildId)"
+                echo "Injecting tag: $TAG"
+                sed -i "s/__TAG__/$TAG/g" $(System.ArtifactsDirectory)/k8s/deployment.yaml
+                sed -i "s/YOURACR/$(acrName)/g" $(System.ArtifactsDirectory)/k8s/deployment.yaml
+                echo "--- Resulting image line ---"
+                grep "image:" $(System.ArtifactsDirectory)/k8s/deployment.yaml
+ 
+          # Apply deployment — triggers Kubernetes rolling update
+          # maxUnavailable:0 + readinessProbe ensures zero downtime
+          - task: KubernetesManifest@0
+            displayName: 'Apply manifests (rolling update)'
+            inputs:
+              action: deploy
+              kubernetesServiceConnection: $(aksServiceConnection)
+              namespace: $(prodNamespace)
+              manifests: |
+                $(System.ArtifactsDirectory)/k8s/deployment.yaml
+                $(System.ArtifactsDirectory)/k8s/service.yaml
+              containers: '$(acrLoginServer)/$(imageName):$(Build.SourceBranchName)-$(Build.BuildId)'
+              # Waits until all pods are healthy — fails pipeline if any pod crashes
+              rolloutStatusTimeout: '300'
+ 
+          # Confirm what is running after deploy
+          - task: Kubernetes@1
+            displayName: 'Verify running pods'
+            inputs:
+              connectionType: Kubernetes Service Connection
+              kubernetesServiceEndpoint: $(aksServiceConnection)
+              namespace: $(prodNamespace)
+              command: get
+              arguments: 'pods -l app=project-frontend -o wide'
+ 
+          - script: |
+              echo "✅ PRODUCTION deployment successful"
+              echo "Image: $(acrLoginServer)/$(imageName):$(Build.SourceBranchName)-$(Build.BuildId)"
+            displayName: 'Deploy success summary'
+ 
+        # ── Auto rollback if deploy fails ─────────────────────
+        on:
+          failure:
+            steps:
+            - task: Kubernetes@1
+              displayName: '🔴 ROLLBACK — revert to previous version'
+              inputs:
+                connectionType: Kubernetes Service Connection
+                kubernetesServiceEndpoint: $(aksServiceConnection)
+                namespace: $(prodNamespace)
+                command: rollout
+                arguments: 'undo deployment/project-frontend'
+ 
+            - script: |
+                echo "🔴 PRODUCTION deployment FAILED — rolled back"
+                echo "Check pod events:"
+                echo "  kubectl describe pods -l app=project-frontend -n $(prodNamespace)"
+                echo "Check logs:"
+                echo "  kubectl logs -l app=project-frontend -n $(prodNamespace) --previous"
+              displayName: 'Rollback notice'

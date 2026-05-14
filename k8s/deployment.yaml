@@ -1,25 +1,58 @@
+# ═══════════════════════════════════════════════════════════════
+# k8s/deployment.yaml
+# Zero downtime rolling deployment for React/Vite + nginx app
+# ═══════════════════════════════════════════════════════════════
+ 
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: powerpulse-frontend
+  name: project-frontend
+  namespace: production
+  labels:
+    app: project-frontend
+    version: "__TAG__"                   # replaced by pipeline sed command
 spec:
-  replicas: 2
+  # ── Replica count ────────────────────────────────────────────
+  # Minimum 3 so during rolling update:
+  # 2 pods keep serving traffic while 1 is being replaced
+  replicas: 3
+ 
   selector:
     matchLabels:
-      app: powerpulse-frontend
+      app: project-frontend
+ 
+  # ── Rolling update strategy (CORE zero downtime setting) ─────
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0     # NEVER kill an old pod before new one is Ready
+      maxSurge: 1           # Allow 1 extra pod during the update
+ 
   template:
     metadata:
       labels:
-        app: powerpulse-frontend
+        app: project-frontend
+        version: "__TAG__"
+ 
     spec:
+      # Must be > preStop sleep duration (15s) to avoid force kill
+      terminationGracePeriodSeconds: 60
+ 
+      # ── Pull image from ACR ─────────────────────────────────
+      # AKS attached to ACR via --attach-acr so no imagePullSecret needed
       containers:
       - name: frontend
-        image: uniquecontainerregistry01.azurecr.io/powerpulse:__TAG__
+        image: YOURACR.azurecr.io/project-frontend:__TAG__
+        # Replace YOURACR with your actual ACR name e.g. mycompanyacr
+        imagePullPolicy: Always           # always pull fresh image on deploy
+ 
         ports:
-          - containerPort: 80
-        envFrom:
-          - configMapRef:
-              name: frontend-config
+        - containerPort: 80
+          name: http
+ 
+        # ── Resource limits ──────────────────────────────────
+        # requests = what Kubernetes reserves on the node
+        # limits   = hard cap to prevent one pod starving others
         resources:
           requests:
             cpu: "100m"
@@ -27,3 +60,48 @@ spec:
           limits:
             cpu: "300m"
             memory: "256Mi"
+ 
+        # ── Readiness probe ───────────────────────────────────
+        # Pod receives ZERO traffic until this returns HTTP 200.
+        # This is what prevents 502 errors during a rolling deploy.
+        # New pod must prove it is healthy before old pod is removed.
+        readinessProbe:
+          httpGet:
+            path: /health               # defined in nginx.conf
+            port: 80
+          initialDelaySeconds: 10       # wait 10s after container starts
+          periodSeconds: 5              # check every 5 seconds
+          failureThreshold: 3           # unready after 3 failures
+          successThreshold: 1           # ready after 1 success
+ 
+        # ── Liveness probe ────────────────────────────────────
+        # Kubernetes restarts the container if this fails.
+        # Catches stuck nginx processes or hung containers.
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 20       # slightly longer than readiness
+          periodSeconds: 10
+          failureThreshold: 3
+ 
+        # ── preStop hook ──────────────────────────────────────
+        # When a pod is being terminated, Azure Load Balancer
+        # takes a few seconds to stop routing traffic to it.
+        # Sleep 15s to drain in-flight requests BEFORE nginx stops.
+        # Without this, ~5% of requests get connection-reset errors.
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "sleep 15"]
+ 
+      # ── Pod spread for high availability ─────────────────────
+      # Spread pods across different nodes so a node failure
+      # doesn't take down all replicas at once
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app: project-frontend
