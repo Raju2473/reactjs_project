@@ -1,0 +1,68 @@
+pipeline {
+    agent any
+
+    environment {
+        JFROG_REGISTRY   = "trialpfwepr.jfrog.io"
+        JFROG_REPO       = "powerpulseapp"
+        IMAGE_NAME       = "powerpulse"
+        IMAGE_TAG        = "${env.BUILD_NUMBER}"
+        FULL_IMAGE       = "${JFROG_REGISTRY}/${JFROG_REPO}/${IMAGE_NAME}:${IMAGE_TAG}"
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                sh "docker build -t ${FULL_IMAGE} ."
+            }
+        }
+
+        stage('Push to JFrog Artifactory') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'jfrog-creds',
+                    usernameVariable: 'JFROG_USER',
+                    passwordVariable: 'JFROG_PASS'
+                )]) {
+                    sh '''
+                        echo "$JFROG_PASS" | docker login ${JFROG_REGISTRY} -u "$JFROG_USER" --password-stdin
+                        docker push ${FULL_IMAGE}
+                        docker logout ${JFROG_REGISTRY}
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig-file', variable: 'KUBECONFIG')]) {
+                    sh '''
+                        echo "Replacing image tag with ${IMAGE_TAG}"
+                        sed -i "s/__TAG__/${IMAGE_TAG}/g" k8s/deployment.yaml
+                        cat k8s/deployment.yaml
+
+                        kubectl --kubeconfig=$KUBECONFIG apply -f k8s/ -n default
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            sh "docker image rm ${FULL_IMAGE} || true"
+        }
+        success {
+            echo "✅ Deployed ${FULL_IMAGE} to Kubernetes"
+        }
+        failure {
+            echo "❌ Pipeline failed — check logs above"
+        }
+    }
+}

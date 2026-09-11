@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
       - name: frontend
-        image: uniquecontainerregistry01.azurecr.io/powerpulse:__TAG__
+        image: trialpfwepr.jfrog.io/powerpulseapp/powerpulse:__TAG__
         ports:
           - containerPort: 80
         envFrom:
@@ -27,3 +27,5 @@ spec:
           limits:
             cpu: "300m"
             memory: "256Mi"
+      imagePullSecrets:
+        - name: jfrog-pull-secret
