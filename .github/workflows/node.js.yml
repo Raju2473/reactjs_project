@@ -47,3 +47,20 @@ jobs:
       
     - name: Gitleaks code scan
       run : gitleaks detect source . -r gitleaks-report.json -f json
+
+
+  test:
+    runs-on: self-hosted
+    needs: compile
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Node.js 22
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: 'npm'
+    - name: Install dependencies
+      run: npm ci
+    - name: Unit Test Cases
+      run: npm test
