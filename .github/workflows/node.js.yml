@@ -96,6 +96,13 @@ jobs:
       run: npm ci
     - name: Build Project
       run: npm run build --if-present
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-dist
+        path: dist/
+        if-no-files-found: error
+        retention-days: 7
     - name: SonarQube Scan
       uses: SonarSource/sonarqube-scan-action@v5
       env:
